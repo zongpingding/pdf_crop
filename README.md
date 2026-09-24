@@ -4,11 +4,11 @@ An Arch Linux / Wayland desktop application based on C++17, Qt 6, Poppler Qt6, a
 
 ![Interface preview](screenshot-en.png)
 
-![View dark theme preview](screenshot-dark.png)
+[View dark theme preview](screenshot-dark.png)
 
-![View Chinese interface preview](screenshot.png)
+[View Chinese interface preview](screenshot.png)
 
-![View 1600% local rendering preview](screenshot-1600.png)
+[View 1600% local rendering preview](screenshot-1600.png)
 
 ## Running
 
