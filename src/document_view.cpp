@@ -9,10 +9,16 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPushButton>
+#include <QLabel>
+#include <QSignalBlocker>
 #include <QScrollBar>
+#include <QShortcut>
 #include <QSplitter>
 #include <QTreeWidget>
+#include <QTimer>
 #include <QWheelEvent>
+#include <QRegion>
 
 #include <algorithm>
 #include <cmath>
@@ -61,8 +67,8 @@ void PageCanvas::setPage(Poppler::Document *document, int pageIndex,
     cache_ = {};
     cacheRect_ = {};
     if (!keepSelection) {
-        selection_ = {};
-        hasSelection_ = false;
+        selections_.clear();
+        active_ = -1;
     }
     auto page = document_ ? document_->page(pageIndex_) : nullptr;
     if (page) {
@@ -81,12 +87,51 @@ void PageCanvas::setPage(Poppler::Document *document, int pageIndex,
     update();
 }
 
-void PageCanvas::setSelection(const QRectF &selection) {
-    selection_ = selection.normalized();
-    hasSelection_ = !selection_.isEmpty();
+void PageCanvas::setSelections(const QVector<QRectF> &selections, int active) {
+    selections_ = selections;
+    active_ = selections_.isEmpty() ? -1 : std::clamp(active, 0, int(selections_.size()) - 1);
     update();
-    if (onSelectionChanged)
-        onSelectionChanged();
+}
+
+void PageCanvas::notifySelectionChanged() {
+    update();
+    if (onSelectionChanged) onSelectionChanged();
+}
+
+void PageCanvas::addFullPage() {
+    selections_.append(QRectF(0, 0, 1, 1));
+    active_ = selections_.size() - 1;
+    notifySelectionChanged();
+}
+
+void PageCanvas::addGrid(int columns, int rows) {
+    if (columns < 1 || rows < 1) return;
+    selections_.clear();
+    for (int row = 0; row < rows; ++row)
+        for (int column = 0; column < columns; ++column)
+            selections_.append(QRectF(double(column) / columns, double(row) / rows,
+                                      1.0 / columns, 1.0 / rows));
+    active_ = selections_.isEmpty() ? -1 : 0;
+    notifySelectionChanged();
+}
+
+void PageCanvas::replaceActive(const QRectF &selection) {
+    if (active_ < 0) return;
+    selections_[active_] = selection.normalized().intersected(QRectF(0, 0, 1, 1));
+    notifySelectionChanged();
+}
+
+void PageCanvas::removeActive() {
+    if (active_ < 0) return;
+    selections_.removeAt(active_);
+    active_ = selections_.isEmpty() ? -1 : std::min(active_, int(selections_.size()) - 1);
+    notifySelectionChanged();
+}
+
+void PageCanvas::setActiveIndex(int index) {
+    if (index < 0 || index >= selections_.size()) return;
+    active_ = index;
+    update();
 }
 
 void PageCanvas::setDarkTheme(bool dark) {
@@ -104,8 +149,7 @@ QPointF PageCanvas::toNormalized(QPointF point) const {
             std::clamp((point.y() - page.top()) / page.height(), 0.0, 1.0)};
 }
 
-QRectF PageCanvas::selectedPixels() const {
-    const QRectF s = dragging_ ? QRectF(start_, end_).normalized() : selection_;
+QRectF PageCanvas::selectedPixels(const QRectF &s) const {
     const QRect page = pageBounds();
     return QRectF(page.left() + s.left() * page.width(),
                   page.top() + s.top() * page.height(),
@@ -158,54 +202,101 @@ void PageCanvas::paintEvent(QPaintEvent *event) {
         }
     }
 
-    if (hasSelection_ || dragging_) {
-        const QRectF region = selectedPixels();
+    if (!selections_.isEmpty() || dragging_) {
         const QColor shade(0, 0, 0, 105);
-        painter.fillRect(QRectF(page.left(), page.top(), page.width(),
-                                region.top() - page.top()), shade);
-        painter.fillRect(QRectF(page.left(), region.bottom(), page.width(),
-                                page.bottom() - region.bottom()), shade);
-        painter.fillRect(QRectF(page.left(), region.top(),
-                                region.left() - page.left(), region.height()), shade);
-        painter.fillRect(QRectF(region.right(), region.top(),
-                                page.right() - region.right(), region.height()), shade);
-        QPen border(QColor(39, 208, 190), 2);
-        border.setCosmetic(true);
-        painter.setPen(border);
-        painter.setBrush(Qt::NoBrush);
-        painter.drawRect(region);
+        QRegion outside(page);
+        for (const auto &selection : selections_)
+            outside -= selectedPixels(selection).toAlignedRect();
+        if (dragging_)
+            outside -= selectedPixels(QRectF(start_, end_).normalized()).toAlignedRect();
+        painter.setClipRegion(outside);
+        painter.fillRect(page, shade);
+        painter.setClipping(false);
+        for (int i = 0; i < selections_.size(); ++i) {
+            QPen border(i == active_ ? QColor(39, 208, 190) : QColor(255, 190, 55),
+                        i == active_ ? 3 : 2);
+            border.setCosmetic(true);
+            painter.setPen(border);
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(selectedPixels(selections_.at(i)));
+        }
+        if (dragging_) {
+            painter.setPen(QPen(QColor(39, 208, 190), 2));
+            painter.drawRect(selectedPixels(QRectF(start_, end_).normalized()));
+        }
     }
 }
 
 void PageCanvas::mousePressEvent(QMouseEvent *event) {
     if (event->button() != Qt::LeftButton || !pageBounds().contains(event->position().toPoint()))
         return;
+    if (onPreviewInteracted) onPreviewInteracted();
     setFocus(Qt::MouseFocusReason);
+    const QPointF point = toNormalized(event->position());
+    if (!(event->modifiers() & Qt::ControlModifier)) {
+        for (int i = selections_.size() - 1; i >= 0; --i) {
+            if (selections_.at(i).contains(point)) {
+                active_ = i;
+                moving_ = true;
+                moveStart_ = point;
+                moveOriginal_ = selections_.at(i);
+                notifySelectionChanged();
+                return;
+            }
+        }
+    }
     dragging_ = true;
-    hasSelection_ = false;
-    start_ = toNormalized(event->position());
+    start_ = point;
     end_ = start_;
     update();
 }
 
 void PageCanvas::mouseMoveEvent(QMouseEvent *event) {
+    if (moving_) {
+        const QPointF delta = toNormalized(event->position()) - moveStart_;
+        const double x = std::clamp(moveOriginal_.x() + delta.x(), 0.0,
+                                    1.0 - moveOriginal_.width());
+        const double y = std::clamp(moveOriginal_.y() + delta.y(), 0.0,
+                                    1.0 - moveOriginal_.height());
+        selections_[active_].moveTo(x, y);
+        update();
+        return;
+    }
     if (!dragging_)
         return;
     end_ = toNormalized(event->position());
+    if (aspectRatio_ > 0 && !pagePixels_.isEmpty()) {
+        double dx = end_.x() - start_.x();
+        double dy = std::copysign(std::abs(dx) * pagePixels_.width() /
+                                  (aspectRatio_ * pagePixels_.height()),
+                                  end_.y() < start_.y() ? -1.0 : 1.0);
+        if (start_.y() + dy < 0 || start_.y() + dy > 1) {
+            dy = std::clamp(start_.y() + dy, 0.0, 1.0) - start_.y();
+            dx = std::copysign(std::abs(dy) * aspectRatio_ * pagePixels_.height() /
+                               pagePixels_.width(), dx);
+        }
+        end_ = {std::clamp(start_.x() + dx, 0.0, 1.0), start_.y() + dy};
+    }
     update();
 }
 
 void PageCanvas::mouseReleaseEvent(QMouseEvent *event) {
+    if (moving_ && event->button() == Qt::LeftButton) {
+        moving_ = false;
+        notifySelectionChanged();
+        return;
+    }
     if (!dragging_ || event->button() != Qt::LeftButton)
         return;
-    end_ = toNormalized(event->position());
+    mouseMoveEvent(event);
     dragging_ = false;
-    selection_ = QRectF(start_, end_).normalized();
-    hasSelection_ = selection_.width() * pagePixels_.width() >= 5 &&
-                    selection_.height() * pagePixels_.height() >= 5;
-    update();
-    if (onSelectionChanged)
-        onSelectionChanged();
+    const QRectF selection = QRectF(start_, end_).normalized();
+    if (selection.width() * pagePixels_.width() >= 5 &&
+        selection.height() * pagePixels_.height() >= 5) {
+        selections_.append(selection);
+        active_ = selections_.size() - 1;
+    }
+    notifySelectionChanged();
 }
 
 void PageCanvas::wheelEvent(QWheelEvent *event) {
@@ -216,8 +307,28 @@ void PageCanvas::wheelEvent(QWheelEvent *event) {
 }
 
 void PageCanvas::keyPressEvent(QKeyEvent *event) {
-    if (!pageStep(event, onPageStep))
-        QWidget::keyPressEvent(event);
+    if (pageStep(event, onPageStep)) return;
+    if (event->key() == Qt::Key_Insert) { addFullPage(); return; }
+    if (event->key() == Qt::Key_Delete && onDelete) {
+        onDelete();
+        return;
+    }
+    if (active_ >= 0 && (event->modifiers() & Qt::ShiftModifier)) {
+        QPointF delta;
+        if (event->key() == Qt::Key_Left) delta.setX(-1.0 / pagePixels_.width());
+        if (event->key() == Qt::Key_Right) delta.setX(1.0 / pagePixels_.width());
+        if (event->key() == Qt::Key_Up) delta.setY(-1.0 / pagePixels_.height());
+        if (event->key() == Qt::Key_Down) delta.setY(1.0 / pagePixels_.height());
+        if (!delta.isNull()) {
+            QRectF moved = selections_.at(active_).translated(delta);
+            moved.moveTo(std::clamp(moved.x(), 0.0, 1.0 - moved.width()),
+                         std::clamp(moved.y(), 0.0, 1.0 - moved.height()));
+            selections_[active_] = moved;
+            notifySelectionChanged();
+            return;
+        }
+    }
+    QWidget::keyPressEvent(event);
 }
 
 void PreviewScrollArea::wheelEvent(QWheelEvent *event) {
@@ -256,9 +367,98 @@ DocumentView::DocumentView(std::unique_ptr<Poppler::Document> document,
     splitter->addWidget(bookmarks_);
     splitter->addWidget(scroll_);
     splitter->setStretchFactor(1, 1);
+
+    auto *selectionPanel = selectionPanel_ = new QWidget(splitter);
+    selectionPanel->setMinimumWidth(190);
+    auto *selectionLayout = new QVBoxLayout(selectionPanel);
+    selectionLayout->setContentsMargins(6, 6, 6, 6);
+    selectionSummary_ = new QLabel(selectionPanel);
+    selectionSummary_->setWordWrap(true);
+    selectionLayout->addWidget(selectionSummary_);
+    selectionTree_ = new QTreeWidget(selectionPanel);
+    selectionTree_->setObjectName(QStringLiteral("selectionTree"));
+    selectionTree_->setHeaderHidden(true);
+    selectionTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    selectionLayout->addWidget(selectionTree_);
+    auto *orderButtons = new QHBoxLayout();
+    moveUp_ = new QPushButton(selectionPanel);
+    moveDown_ = new QPushButton(selectionPanel);
+    orderButtons->addWidget(moveUp_);
+    orderButtons->addWidget(moveDown_);
+    selectionLayout->addLayout(orderButtons);
+    splitter->addWidget(selectionPanel);
+    splitter->setStretchFactor(2, 0);
     layout->addWidget(splitter);
 
-    canvas_->onSelectionChanged = [this] { if (onStateChanged) onStateChanged(); };
+    canvas_->onSelectionChanged = [this] {
+        selectionTree_->clearSelection();
+        selectionAnchorPage_ = -1;
+        selectionAnchorIndex_ = -1;
+        storeCurrentSelections();
+        refreshSelectionList();
+        if (onStateChanged) onStateChanged();
+    };
+    canvas_->onPreviewInteracted = [this] {
+        selectionTree_->clearSelection();
+        selectionAnchorPage_ = -1;
+        selectionAnchorIndex_ = -1;
+    };
+    canvas_->onDelete = [this] { deleteSelectedOrActive(); };
+    auto *deleteShortcut = new QShortcut(QKeySequence(Qt::Key_Delete), selectionTree_);
+    deleteShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(deleteShortcut, &QShortcut::activated, this,
+            [this] { deleteSelectedOrActive(); });
+    connect(selectionTree_, &QTreeWidget::itemSelectionChanged, this,
+            [this] {
+        const bool oneOrNone = selectedSelectionCount() <= 1;
+        const int active = canvas_->activeIndex();
+        moveUp_->setEnabled(oneOrNone && active > 0);
+        moveDown_->setEnabled(oneOrNone && active >= 0 &&
+                              active + 1 < canvas_->selections().size());
+        if (onStateChanged) onStateChanged();
+    });
+    connect(selectionTree_, &QTreeWidget::itemClicked, this,
+            [this](QTreeWidgetItem *item, int) {
+        const int page = item->data(0, Qt::UserRole).toInt();
+        const int selection = item->data(0, Qt::UserRole + 1).toInt();
+        if (selection >= 0) {
+            if ((QApplication::keyboardModifiers() & Qt::ShiftModifier) &&
+                selectionAnchorPage_ >= 0) {
+                const auto before = [](int aPage, int aSelection,
+                                       int bPage, int bSelection) {
+                    return aPage < bPage || (aPage == bPage && aSelection <= bSelection);
+                };
+                const bool forward = before(selectionAnchorPage_, selectionAnchorIndex_,
+                                            page, selection);
+                const int firstPage = forward ? selectionAnchorPage_ : page;
+                const int firstSelection = forward ? selectionAnchorIndex_ : selection;
+                const int lastPage = forward ? page : selectionAnchorPage_;
+                const int lastSelection = forward ? selection : selectionAnchorIndex_;
+                const QSignalBlocker blocker(selectionTree_);
+                selectionTree_->clearSelection();
+                for (int p = firstPage; p <= lastPage; ++p) {
+                    auto *parent = selectionTree_->topLevelItem(p);
+                    for (int s = 0; s < parent->childCount(); ++s)
+                        if (before(firstPage, firstSelection, p, s) &&
+                            before(p, s, lastPage, lastSelection))
+                            parent->child(s)->setSelected(true);
+                }
+            } else {
+                selectionAnchorPage_ = page;
+                selectionAnchorIndex_ = selection;
+            }
+        }
+        QTimer::singleShot(0, this, [this, page, selection] {
+            setPageIndex(page);
+            if (selection >= 0) {
+                canvas_->setActiveIndex(selection);
+                refreshSelectionList();
+            }
+            if (onStateChanged) onStateChanged();
+        });
+    });
+    connect(moveUp_, &QPushButton::clicked, this, [this] { moveActiveSelection(-1); });
+    connect(moveDown_, &QPushButton::clicked, this, [this] { moveActiveSelection(1); });
     const auto pageStepCallback = [this](int step) { setPageIndex(pageIndex_ + step); };
     canvas_->onPageStep = pageStepCallback;
     scroll_->onPageStep = pageStepCallback;
@@ -270,7 +470,7 @@ DocumentView::DocumentView(std::unique_ptr<Poppler::Document> document,
     hasBookmarks_ = !outlines.isEmpty();
     if (hasBookmarks_) {
         addBookmarks(outlines, nullptr);
-        splitter->setSizes({240, 800});
+        splitter->setSizes({220, 650, 230});
     } else {
         bookmarks_->hide();
     }
@@ -284,6 +484,7 @@ DocumentView::DocumentView(std::unique_ptr<Poppler::Document> document,
     connect(bookmarks_, &QTreeWidget::itemActivated, this,
             [jump](QTreeWidgetItem *item, int) { jump(item); });
     renderPage(false);
+    retranslateUi();
 }
 
 DocumentView::~DocumentView() = default;
@@ -320,8 +521,197 @@ QRectF DocumentView::selectionForExport() const {
     return rotatedRect(canvas_->selection(), (4 - quarterTurns_) & 3);
 }
 
+QVector<QRectF> DocumentView::storedSelections(int pageIndex) const {
+    if (selectionMode_ == SelectionMode::Individual || exceptions_.contains(pageIndex))
+        return individualSelections_.value(pageIndex);
+    if (selectionMode_ == SelectionMode::OddEven)
+        return pageIndex % 2 == 0 ? oddSelections_ : evenSelections_;
+    return sharedSelections_;
+}
+
+QVector<QRectF> DocumentView::selectionsForExport(int pageIndex) const {
+    return storedSelections(pageIndex);
+}
+
+void DocumentView::storeCurrentSelections() {
+    QVector<QRectF> selections;
+    for (const QRectF &selection : canvas_->selections())
+        selections.append(rotatedRect(selection, (4 - quarterTurns_) & 3));
+    if (selectionMode_ == SelectionMode::Individual || exceptions_.contains(pageIndex_))
+        individualSelections_[pageIndex_] = selections;
+    else if (selectionMode_ == SelectionMode::OddEven)
+        (pageIndex_ % 2 == 0 ? oddSelections_ : evenSelections_) = selections;
+    else
+        sharedSelections_ = selections;
+}
+
+void DocumentView::refreshSelectionList() {
+    if (!selectionTree_) return;
+    auto key = [](int page, int selection) {
+        return (quint64(quint32(page)) << 32) | quint32(selection);
+    };
+    QSet<quint64> selected;
+    for (auto *item : selectionTree_->selectedItems()) {
+        const int selection = item->data(0, Qt::UserRole + 1).toInt();
+        if (selection >= 0)
+            selected.insert(key(item->data(0, Qt::UserRole).toInt(), selection));
+    }
+    const QSignalBlocker blocker(selectionTree_);
+    selectionTree_->clear();
+    int pagesWithSelections = 0;
+    for (int page = 0; page < pageCount(); ++page) {
+        const int count = storedSelections(page).size();
+        if (count) ++pagesWithSelections;
+        auto *item = new QTreeWidgetItem(selectionTree_);
+        item->setText(0, tr("Page %1 — %2 selections").arg(page + 1).arg(count));
+        item->setData(0, Qt::UserRole, page);
+        item->setData(0, Qt::UserRole + 1, -1);
+        item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
+        if (!count) item->setForeground(0, palette().color(QPalette::Disabled, QPalette::Text));
+        for (int index = 0; index < count; ++index) {
+            auto *child = new QTreeWidgetItem(item);
+            child->setFlags(child->flags() | Qt::ItemIsSelectable);
+            child->setText(0, tr("Selection %1").arg(index + 1));
+            child->setData(0, Qt::UserRole, page);
+            child->setData(0, Qt::UserRole + 1, index);
+            if (page == pageIndex_ && index == canvas_->activeIndex())
+                selectionTree_->setCurrentItem(child);
+        }
+        item->setExpanded(count > 0);
+        if (page == pageIndex_ && canvas_->activeIndex() < 0)
+            selectionTree_->setCurrentItem(item);
+    }
+    selectionTree_->clearSelection();
+    for (quint64 selectedKey : selected) {
+        const int page = int(selectedKey >> 32);
+        const int index = int(selectedKey & 0xffffffffu);
+        if (page >= 0 && page < selectionTree_->topLevelItemCount()) {
+            auto *parent = selectionTree_->topLevelItem(page);
+            if (index >= 0 && index < parent->childCount())
+                parent->child(index)->setSelected(true);
+        }
+    }
+    selectionSummary_->setText(tr("%1 of %2 pages have selections")
+                                   .arg(pagesWithSelections).arg(pageCount()));
+    const int active = canvas_->activeIndex();
+    const bool singleSelection = selectionTree_->selectedItems().size() <= 1;
+    moveUp_->setEnabled(singleSelection && active > 0);
+    moveDown_->setEnabled(singleSelection && active >= 0 &&
+                          active + 1 < canvas_->selections().size());
+}
+
+int DocumentView::selectedSelectionCount() const {
+    return selectionTree_ ? selectionTree_->selectedItems().size() : 0;
+}
+
+void DocumentView::deleteSelectedOrActive() {
+    QHash<int, QSet<int>> groups;
+    for (auto *item : selectionTree_->selectedItems()) {
+        const int index = item->data(0, Qt::UserRole + 1).toInt();
+        if (index < 0) continue;
+        const int page = item->data(0, Qt::UserRole).toInt();
+        int group = page;
+        if (selectionMode_ != SelectionMode::Individual && !exceptions_.contains(page)) {
+            group = selectionMode_ == SelectionMode::Shared ? -1 : (page % 2 ? -3 : -2);
+        }
+        groups[group].insert(index);
+    }
+    if (groups.isEmpty()) {
+        canvas_->removeActive();
+        return;
+    }
+    for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
+        QVector<QRectF> *target = it.key() == -1 ? &sharedSelections_ :
+                                  it.key() == -2 ? &oddSelections_ :
+                                  it.key() == -3 ? &evenSelections_ :
+                                                   &individualSelections_[it.key()];
+        QList<int> indices = it.value().values();
+        std::sort(indices.begin(), indices.end(), std::greater<int>());
+        for (int index : indices)
+            if (index >= 0 && index < target->size()) target->removeAt(index);
+    }
+    selectionTree_->clearSelection();
+    selectionAnchorPage_ = -1;
+    selectionAnchorIndex_ = -1;
+    renderPage(false);
+    refreshSelectionList();
+    if (onStateChanged) onStateChanged();
+}
+
+void DocumentView::retranslateUi() {
+    moveUp_->setText(tr("Move up"));
+    moveDown_->setText(tr("Move down"));
+    refreshSelectionList();
+}
+
+void DocumentView::moveActiveSelection(int step) {
+    const int active = canvas_->activeIndex();
+    QVector<QRectF> selections = storedSelections(pageIndex_);
+    const int target = active + step;
+    if (active < 0 || target < 0 || target >= selections.size()) return;
+    const bool keepSelected = selectedSelectionCount() == 1;
+    selectionTree_->clearSelection();
+    selections.swapItemsAt(active, target);
+    setCurrentSelections(selections, target);
+    if (keepSelected)
+        selectionTree_->topLevelItem(pageIndex_)->child(target)->setSelected(true);
+}
+
+void DocumentView::setSelectionMode(SelectionMode mode) {
+    if (mode == selectionMode_) return;
+    const QVector<QRectF> current = storedSelections(pageIndex_);
+    if (mode == SelectionMode::OddEven) {
+        if (oddSelections_.isEmpty()) oddSelections_ = current;
+        if (evenSelections_.isEmpty()) evenSelections_ = current;
+    } else if (mode == SelectionMode::Individual) {
+        if (!individualSelections_.contains(pageIndex_))
+            individualSelections_[pageIndex_] = current;
+    } else if (sharedSelections_.isEmpty()) {
+        sharedSelections_ = current;
+    }
+    selectionMode_ = mode;
+    renderPage(false);
+    refreshSelectionList();
+    if (onStateChanged) onStateChanged();
+}
+
+void DocumentView::setExceptions(const QSet<int> &pages) {
+    for (int page : pages) {
+        if (!exceptions_.contains(page) && !individualSelections_.contains(page))
+            individualSelections_[page] = storedSelections(page);
+    }
+    exceptions_ = pages;
+    renderPage(false);
+    refreshSelectionList();
+    if (onStateChanged) onStateChanged();
+}
+
+void DocumentView::setCurrentSelections(const QVector<QRectF> &selections, int active) {
+    QVector<QRectF> rotated;
+    for (const QRectF &selection : selections)
+        rotated.append(rotatedRect(selection, quarterTurns_));
+    canvas_->setSelections(rotated, active);
+    storeCurrentSelections();
+    refreshSelectionList();
+    if (onStateChanged) onStateChanged();
+}
+
 bool DocumentView::bookmarksVisible() const {
     return hasBookmarks_ && !bookmarks_->isHidden();
+}
+
+bool DocumentView::selectionListVisible() const {
+    return !selectionPanel_->isHidden();
+}
+
+void DocumentView::setSelectionListVisible(bool visible) {
+    if (!visible) {
+        selectionTree_->clearSelection();
+        selectionAnchorPage_ = -1;
+        selectionAnchorIndex_ = -1;
+    }
+    selectionPanel_->setVisible(visible);
+    if (onStateChanged) onStateChanged();
 }
 
 void DocumentView::setBookmarksVisible(bool visible) {
@@ -334,6 +724,12 @@ void DocumentView::setBookmarksVisible(bool visible) {
 
 void DocumentView::renderPage(bool keepSelection) {
     canvas_->setPage(document_.get(), pageIndex_, zoomPercent_, quarterTurns_, keepSelection);
+    if (!keepSelection) {
+        QVector<QRectF> rotated;
+        for (const QRectF &selection : storedSelections(pageIndex_))
+            rotated.append(rotatedRect(selection, quarterTurns_));
+        canvas_->setSelections(rotated, 0);
+    }
 }
 
 void DocumentView::setPageIndex(int index) {
@@ -341,6 +737,7 @@ void DocumentView::setPageIndex(int index) {
         return;
     pageIndex_ = index;
     renderPage(false);
+    refreshSelectionList();
     scroll_->horizontalScrollBar()->setValue(0);
     scroll_->verticalScrollBar()->setValue(0);
     canvas_->setFocus(Qt::OtherFocusReason);
@@ -373,12 +770,9 @@ void DocumentView::setQuarterTurns(int turns) {
     turns &= 3;
     if (turns == quarterTurns_)
         return;
-    const bool selected = canvas_->hasSelection();
-    const QRectF originalSelection = selectionForExport();
     quarterTurns_ = turns;
     renderPage(false);
-    if (selected)
-        canvas_->setSelection(rotatedRect(originalSelection, turns));
+    refreshSelectionList();
     if (onStateChanged)
         onStateChanged();
 }

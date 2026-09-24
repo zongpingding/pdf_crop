@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(pdf_select_crop VERSION 0.3.0 LANGUAGES C CXX)
+project(pdf_select_crop VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -15,6 +15,8 @@ qt_add_executable(pdf-select-crop
     src/main.cpp
     src/document_view.cpp
     src/document_view.h
+    src/crop_plan.cpp
+    src/crop_plan.h
     src/pdf_backend.c
     src/pdf_backend.h
     src/raster_backend.cpp
@@ -34,3 +36,20 @@ target_link_libraries(pdf-select-crop PRIVATE
 )
 
 install(TARGETS pdf-select-crop RUNTIME DESTINATION bin)
+
+include(CTest)
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    find_program(PDFINFO_EXECUTABLE pdfinfo)
+    find_program(PDFTOTEXT_EXECUTABLE pdftotext)
+    if(Python3_Interpreter_FOUND AND PDFINFO_EXECUTABLE AND PDFTOTEXT_EXECUTABLE)
+        add_test(NAME export_smoke
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/smoke.py
+                         $<TARGET_FILE:pdf-select-crop>)
+    endif()
+    add_executable(view_smoke tests/view_smoke.cpp src/document_view.cpp)
+    target_include_directories(view_smoke PRIVATE src)
+    target_link_libraries(view_smoke PRIVATE Qt6::Widgets Qt6::Gui PkgConfig::POPPLER_QT6)
+    add_test(NAME view_smoke COMMAND $<TARGET_FILE:view_smoke>)
+    set_tests_properties(view_smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()

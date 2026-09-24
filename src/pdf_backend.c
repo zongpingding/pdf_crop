@@ -89,20 +89,101 @@ static void crop_page(fz_context *ctx, pdf_document *doc, int index,
 }
 
 int export_vector_pdf(const char *input_path, const char *output_path,
-                      int page_index, int all_pages,
-                      float x0, float y0, float x1, float y1,
+                      const pdf_crop_job *jobs, size_t job_count, int rotation,
                       char *error, size_t error_capacity)
 {
     if (error && error_capacity)
         error[0] = '\0';
     if (!input_path || !output_path || !*input_path || !*output_path ||
         strcmp(input_path, output_path) == 0 ||
-        !(x0 >= 0 && y0 >= 0 && x1 <= 1 && y1 <= 1 && x0 < x1 && y0 < y1)) {
+        !jobs || !job_count || rotation < 0 || rotation > 270 || rotation % 90) {
         if (error && error_capacity)
             snprintf(error, error_capacity, "Invalid file path or selection");
         return 0;
     }
 
+    fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    if (!ctx) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "Could not create MuPDF context");
+        return 0;
+    }
+    pdf_document *source = NULL;
+    pdf_document *result = NULL;
+    fz_var(source);
+    fz_var(result);
+    int ok = 1;
+    fz_try(ctx) {
+        fz_register_document_handlers(ctx);
+        source = pdf_open_document(ctx, input_path);
+        if (pdf_needs_password(ctx, source))
+            fz_throw(ctx, FZ_ERROR_ARGUMENT, "Password-protected PDFs are not supported yet");
+        const int count = pdf_count_pages(ctx, source);
+        int unique_pages = 1;
+        for (size_t i = 0; i < job_count; ++i) {
+            const pdf_crop_job job = jobs[i];
+            if (job.page_index < 0 || job.page_index >= count ||
+                !(job.x0 >= 0 && job.y0 >= 0 && job.x1 <= 1 && job.y1 <= 1 &&
+                  job.x0 < job.x1 && job.y0 < job.y1))
+                fz_throw(ctx, FZ_ERROR_ARGUMENT, "Invalid PDF page number or selection");
+            if (i && job.page_index <= jobs[i - 1].page_index) unique_pages = 0;
+        }
+        // Keep document metadata and outlines when every source page appears
+        // at most once. Repeated pages require independent grafted copies.
+        result = unique_pages ? source : pdf_create_document(ctx);
+        if (unique_pages) source = NULL;
+        for (size_t i = 0; i < job_count; ++i) {
+            const pdf_crop_job job = jobs[i];
+            const int target = unique_pages ? job.page_index : (int)i;
+            if (!unique_pages)
+                pdf_graft_page(ctx, result, -1, source, job.page_index);
+            crop_page(ctx, result, target, job.x0, job.y0, job.x1, job.y1);
+            if (rotation) {
+                pdf_obj *page_obj = pdf_lookup_page_obj(ctx, result, target);
+                int old_rotation = pdf_dict_get_inheritable_int(ctx, page_obj, PDF_NAME(Rotate));
+                pdf_dict_put_int(ctx, page_obj, PDF_NAME(Rotate),
+                                 (old_rotation + rotation) % 360);
+            }
+        }
+        if (unique_pages) {
+            size_t keep = job_count;
+            for (int page = count - 1; page >= 0; --page) {
+                if (keep && jobs[keep - 1].page_index == page) --keep;
+                else pdf_delete_page(ctx, result, page);
+            }
+        }
+
+        pdf_write_options write_options = pdf_default_write_options;
+        write_options.do_compress = 1;
+        write_options.do_compress_images = 1;
+        write_options.do_compress_fonts = 1;
+        write_options.do_garbage = 3;
+        pdf_save_document(ctx, result, output_path, &write_options);
+    }
+    fz_catch(ctx) {
+        ok = 0;
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "%s", fz_caught_message(ctx));
+    }
+    if (result)
+        pdf_drop_document(ctx, result);
+    if (source)
+        pdf_drop_document(ctx, source);
+    fz_drop_context(ctx);
+    return ok;
+}
+
+int export_full_pages_pdf(const char *input_path, const char *output_path,
+                          const int *pages, size_t page_count,
+                          char *error, size_t error_capacity)
+{
+    if (error && error_capacity) error[0] = '\0';
+    if (!input_path || !output_path || !*input_path || !*output_path ||
+        strcmp(input_path, output_path) == 0 || !pages || !page_count) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "Invalid file path or page range");
+        return 0;
+    }
     fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
     if (!ctx) {
         if (error && error_capacity)
@@ -117,34 +198,26 @@ int export_vector_pdf(const char *input_path, const char *output_path,
         doc = pdf_open_document(ctx, input_path);
         if (pdf_needs_password(ctx, doc))
             fz_throw(ctx, FZ_ERROR_ARGUMENT, "Password-protected PDFs are not supported yet");
-        int count = pdf_count_pages(ctx, doc);
-        if (count < 1 || page_index < 0 || page_index >= count)
-            fz_throw(ctx, FZ_ERROR_ARGUMENT, "Invalid PDF page number");
-
-        if (all_pages) {
-            for (int i = 0; i < count; ++i)
-                crop_page(ctx, doc, i, x0, y0, x1, y1);
-        } else {
-            crop_page(ctx, doc, page_index, x0, y0, x1, y1);
-            for (int i = count - 1; i >= 0; --i)
-                if (i != page_index)
-                    pdf_delete_page(ctx, doc, i);
+        const int count = pdf_count_pages(ctx, doc);
+        for (size_t i = 0; i < page_count; ++i)
+            if (pages[i] < 0 || pages[i] >= count || (i && pages[i] <= pages[i - 1]))
+                fz_throw(ctx, FZ_ERROR_ARGUMENT, "Invalid page range");
+        size_t keep = page_count;
+        for (int page = count - 1; page >= 0; --page) {
+            if (keep && pages[keep - 1] == page) --keep;
+            else pdf_delete_page(ctx, doc, page);
         }
-
-        pdf_write_options write_options = pdf_default_write_options;
-        write_options.do_compress = 1;
-        write_options.do_compress_images = 1;
-        write_options.do_compress_fonts = 1;
-        write_options.do_garbage = 3;
-        pdf_save_document(ctx, doc, output_path, &write_options);
+        pdf_write_options options = pdf_default_write_options;
+        options.do_compress = 1;
+        options.do_garbage = 3;
+        pdf_save_document(ctx, doc, output_path, &options);
     }
     fz_catch(ctx) {
         ok = 0;
         if (error && error_capacity)
             snprintf(error, error_capacity, "%s", fz_caught_message(ctx));
     }
-    if (doc)
-        pdf_drop_document(ctx, doc);
+    if (doc) pdf_drop_document(ctx, doc);
     fz_drop_context(ctx);
     return ok;
 }
