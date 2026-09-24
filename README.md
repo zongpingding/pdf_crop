@@ -1,53 +1,53 @@
-# PDF 区域裁剪
+# PDF Region Cropping
 
-基于 C++17、Qt 6、Poppler Qt6 和 MuPDF 的 Arch Linux / Wayland 桌面应用。打开 PDF，在应用内拖动鼠标框选区域，再选择导出方式。无需 `slurp`、`pdfcrop` 或 `mutool` 命令。
+An Arch Linux / Wayland desktop application based on C++17, Qt 6, Poppler Qt6, and MuPDF. Open a PDF, drag the mouse to select a region within the app, then choose an export method. No `slurp`, `pdfcrop`, or `mutool` commands required.
 
-![界面预览](screenshot.png)
+![Interface preview](screenshot-en.png)
 
-[查看暗色主题预览](screenshot-dark.png)
+![View dark theme preview](screenshot-dark.png)
 
-[查看英文界面预览](screenshot-en.png)
+![View Chinese interface preview](screenshot.png)
 
-[查看 1600% 局部渲染预览](screenshot-1600.png)
+![View 1600% local rendering preview](screenshot-1600.png)
 
-## 运行
+## Running
 
-随附的 `bin/pdf-select-crop` 是在 Arch Linux x86_64 上编译的动态链接程序。需要安装 `qt6-base`、`qt6-wayland`、`poppler-qt6` 和 `libmupdf`：
+The bundled `bin/pdf-select-crop` is a dynamically linked program compiled on Arch Linux x86_64. It requires `qt6-base`, `qt6-wayland`, `poppler-qt6`, and `libmupdf` to be installed:
 
 ```sh
 sudo pacman -S --needed qt6-base qt6-wayland poppler-qt6 libmupdf
-./bin/pdf-select-crop [输入文件.pdf]
+./bin/pdf-select-crop [input-file.pdf]
 ```
 
-也可以自行构建：
+Alternatively, you can build it yourself:
 
 ```sh
 sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-wayland qt6-tools poppler-qt6 libmupdf
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-./build/pdf-select-crop [输入文件.pdf]
+./build/pdf-select-crop [input-file.pdf]
 ```
 
-## 使用
+## Usage
 
-1. 用 Ctrl+O 或“打开 PDF”选择多个文件，每个 PDF 会出现在独立标签页；Ctrl+W 或标签上的关闭按钮可关闭当前页签。重新打开已打开的文件会切换到已有标签页。
-2. 在页面上按住鼠标左键拖出裁剪矩形。顶部页码框可直接跳转；预览区获得焦点时，空格/Shift+空格可前后翻页。
-3. 预览区单独滚轮上下移动，Shift+滚轮左右移动，Ctrl+滚轮缩放。缩放范围为 25%–1600%，每档 10%；顶部缩放控件也可直接输入百分比。缩放时选区会保留。
-4. “旋转”控件提供 0°、90°、180°、270° 四个预览角度。旋转后选区仍对应原 PDF 的正确位置；导出 PDF 保持原有页面方向。
-5. 有书签的 PDF 会显示书签侧栏，可点击跳转；没有书签时按钮禁用、侧栏隐藏。
-6. 选择“仅导出当前页”或“相同选区比例应用到全部页面”。全部页面模式按宽、高比例套用选区，适合不同尺寸和旋转的页面。
-7. 选择导出方式，再点击“导出选区…”。导出文件必须与原文件不同。
+1. Use Ctrl+O or "Open PDF" to select multiple files; each PDF appears in its own tab. Ctrl+W or the close button on the tab closes the current tab. Reopening an already-open file switches to its existing tab.
+2. Hold the left mouse button and drag on the page to draw a cropping rectangle. The page number box at the top allows direct navigation; when the preview area has focus, Space/Shift+Space moves to the next/previous page.
+3. In the preview area, the scroll wheel moves up and down, Shift+scroll moves left and right, and Ctrl+scroll zooms. The zoom range is 25%–1600%, in 10% steps; the zoom control at the top also accepts a directly entered percentage. The selection is preserved when zooming.
+4. The "Rotate" control provides four preview angles: 0°, 90°, 180°, and 270°. After rotation, the selection still corresponds to the correct position in the original PDF; the exported PDF retains the original page orientation.
+5. PDFs with bookmarks display a bookmark sidebar that can be clicked to jump; when there are no bookmarks, the button is disabled and the sidebar is hidden.
+6. Choose "Export current page only" or "Apply the same selection ratio to all pages." All-pages mode applies the selection by width and height ratio, which suits pages of different sizes and rotations.
+7. Choose an export method, then click "Export selection…". The exported file must differ from the original file.
 
-“历史”菜单保存最近打开的 10 个文件路径，可再次打开或清空记录；“主题”菜单可切换亮色和暗色；“语言”菜单可在简体中文与英语之间切换。这些设置会在下次启动时保留。界面译文位于 `i18n/`，构建时由 Qt Linguist Tools 编译并嵌入程序。
+The "History" menu stores the paths of the 10 most recently opened files, which can be reopened or cleared; the "Theme" menu switches between light and dark; the "Language" menu switches between Simplified Chinese and English. These settings are retained on the next launch. Interface translations are located in `i18n/` and are compiled and embedded into the program at build time by Qt Linguist Tools.
 
-预览使用 Poppler 的抗锯齿局部渲染，只生成视口附近的像素，而不是缓存整页高倍位图。因此高倍率下的文字和矢量图形仍按当前倍率渲染，内存占用主要随窗口大小变化。源 PDF 内嵌的低分辨率图片本身不会因此变清晰。
+The preview uses Poppler's anti-aliased local rendering, generating only the pixels near the viewport rather than caching a full-page high-magnification bitmap. As a result, text and vector graphics at high magnification are still rendered at the current magnification, and memory usage mainly varies with window size. Low-resolution images embedded in the source PDF will not become clearer as a result.
 
-“保留文字与矢量（尽量移除）”使用 MuPDF 过滤完全落在选区外的绘制对象，调整输出页面尺寸，保留选区内可搜索的文字和矢量图形。**跨越边界的图片、字形或复杂绘制对象仍可能携带选区外数据**；不要用此模式处理需要彻底清除的敏感信息。部分复杂 PDF 的视觉结果也可能与原件略有差异。
+"Preserve text and vectors (remove as much as possible)" uses MuPDF to filter out drawing objects that lie entirely outside the selection, adjusts the output page size, and preserves searchable text and vector graphics within the selection. **Images, glyphs, or complex drawing objects that cross the boundary may still carry data from outside the selection**; do not use this mode for sensitive information that must be thoroughly removed. The visual result for some complex PDFs may also differ slightly from the original.
 
-“严格移除（转为图片）”只渲染选区内的页面像素，再写入全新的 PDF。原文件中的文字、矢量、注释、附件和原始图像流不会复制到输出文件。它适合需要移除区域外原始 PDF 数据的场景，但输出页面是位图，文字不能搜索或选取，也不保留矢量可编辑性。可选 150–600 DPI，默认 300 DPI；过大的页面会提示降低 DPI。
+"Strict removal (convert to image)" renders only the page pixels within the selection, then writes them into a brand-new PDF. Text, vectors, annotations, attachments, and original image streams from the source file are not copied to the output file. It is suitable for scenarios where the original PDF data outside the region must be removed, but the output page is a bitmap, so text cannot be searched or selected, and vector editability is not preserved. A DPI of 150–600 can be selected, with a default of 300 DPI; overly large pages will prompt you to lower the DPI.
 
-暂不支持加密 PDF。导出期间窗口会等待处理完成，大文件可能需要一些时间。
+Encrypted PDFs are not currently supported. The window waits for processing to complete during export, and large files may take some time.
 
-## 许可
+## License
 
-本项目源代码采用 [AGPL-3.0-or-later](LICENSE)。项目链接 MuPDF；再分发或闭源使用时，应核对 MuPDF 的 AGPL / 商业授权条款。Qt、Poppler 及其依赖仍遵循各自许可。
+The source code of this project is licensed under [AGPL-3.0-or-later](LICENSE). The project links against MuPDF; when redistributing or using it in a closed-source context, you should verify MuPDF's AGPL / commercial licensing terms. Qt, Poppler, and their dependencies remain under their respective licenses.
