@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include "document_view.h"
+#include "crop_plan.h"
 
 #include <poppler-qt6.h>
 
@@ -99,5 +100,16 @@ int main(int argc, char **argv) {
                "Hiding selection list kept invisible selections")) return 1;
     view.setSelectionListVisible(true);
     if (!check(view.selectionListVisible(), "Selection list did not reopen")) return 1;
+    QVector<int> pages;
+    QString rangeError;
+    if (!check(parsePageRange(QStringLiteral("2x+1"), 10, pages, rangeError) &&
+               pages == QVector<int>({2, 4, 6, 8}), "2x+1 page progression failed")) return 1;
+    if (!check(parsePageRange(QStringLiteral("3x+3"), 12, pages, rangeError) &&
+               pages == QVector<int>({5, 8, 11}), "3x+3 page progression failed")) return 1;
+    if (!check(parsePageRange(QStringLiteral("1-2,2x+1"), 7, pages, rangeError) &&
+               pages == QVector<int>({0, 1, 2, 4, 6}), "Mixed page range failed")) return 1;
+    if (!check(!parsePageRange(QStringLiteral("0x+1"), 10, pages, rangeError) &&
+               !parsePageRange(QStringLiteral("2x+99"), 10, pages, rangeError),
+               "Invalid page progression accepted")) return 1;
     return 0;
 }

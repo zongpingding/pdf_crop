@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(pdf_select_crop VERSION 0.5.0 LANGUAGES C CXX)
+project(prop VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -11,7 +11,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
 pkg_check_modules(MUPDF REQUIRED IMPORTED_TARGET mupdf)
 
-qt_add_executable(pdf-select-crop
+qt_add_executable(prop
     src/main.cpp
     src/document_view.cpp
     src/document_view.h
@@ -23,19 +23,19 @@ qt_add_executable(pdf-select-crop
     src/raster_backend.h
 )
 
-qt_add_translations(pdf-select-crop
-    TS_FILES i18n/pdf-select-crop_zh_CN.ts
+qt_add_translations(prop
+    TS_FILES i18n/prop_zh_CN.ts
     RESOURCE_PREFIX "/i18n"
 )
 
-target_link_libraries(pdf-select-crop PRIVATE
+target_link_libraries(prop PRIVATE
     Qt6::Widgets
     Qt6::Gui
     PkgConfig::POPPLER_QT6
     PkgConfig::MUPDF
 )
 
-install(TARGETS pdf-select-crop RUNTIME DESTINATION bin)
+install(TARGETS prop RUNTIME DESTINATION bin)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -45,9 +45,9 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND AND PDFINFO_EXECUTABLE AND PDFTOTEXT_EXECUTABLE)
         add_test(NAME export_smoke
                  COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/smoke.py
-                         $<TARGET_FILE:pdf-select-crop>)
+                         $<TARGET_FILE:prop>)
     endif()
-    add_executable(view_smoke tests/view_smoke.cpp src/document_view.cpp)
+    add_executable(view_smoke tests/view_smoke.cpp src/document_view.cpp src/crop_plan.cpp)
     target_include_directories(view_smoke PRIVATE src)
     target_link_libraries(view_smoke PRIVATE Qt6::Widgets Qt6::Gui PkgConfig::POPPLER_QT6)
     add_test(NAME view_smoke COMMAND $<TARGET_FILE:view_smoke>)

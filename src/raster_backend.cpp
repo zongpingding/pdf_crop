@@ -30,7 +30,7 @@ bool export_raster_pdf(const Poppler::Document &document, const QString &output,
         QPdfWriter writer(&file);
         writer.setResolution(dpi);
         writer.setPageMargins(QMarginsF(0, 0, 0, 0));
-        writer.setCreator(QStringLiteral("PDF Select Crop"));
+        writer.setCreator(QStringLiteral("prop"));
         QPainter painter;
 
         for (int i = 0; i < jobs.size(); ++i) {

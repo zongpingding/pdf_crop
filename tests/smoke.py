@@ -55,7 +55,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("binary", type=Path)
     binary = str(parser.parse_args().binary.resolve())
-    with tempfile.TemporaryDirectory(prefix="pdf-select-crop-test-") as directory:
+    with tempfile.TemporaryDirectory(prefix="prop-test-") as directory:
         root = Path(directory)
         source = root / "source.pdf"
         make_pdf(source)
@@ -65,6 +65,35 @@ def main() -> None:
         assert page_count(grid) == 4
         text = run("pdftotext", str(grid), "-")
         assert "FIRST PAGE" in text and "THIRD PAGE" in text and "SECOND PAGE" not in text
+
+        progression = root / "progression.pdf"
+        run(binary, "--go", "--whichpages", "2x+1", "-o", str(progression), str(source))
+        assert page_count(progression) == 1
+        assert "THIRD PAGE" in run("pdftotext", str(progression), "-")
+
+        separate = root / "separate"
+        run(binary, "--go", "--separate", "--whichpages", "1,3", "--grid", "2x1",
+            "-o", str(separate), str(source))
+        outputs = sorted(separate.glob("*.pdf"))
+        assert [item.name for item in outputs] == [
+            "page-01-selection-01.pdf", "page-01-selection-02.pdf",
+            "page-03-selection-01.pdf", "page-03-selection-02.pdf",
+        ]
+        assert all(page_count(item) == 1 for item in outputs)
+        assert "THIRD PAGE" in run("pdftotext", str(outputs[-2]), "-")
+        repeated = subprocess.run(
+            [binary, "--go", "--separate", "--grid", "2x1", "-o", str(separate),
+             str(source)], text=True, capture_output=True)
+        assert repeated.returncode != 0 and len(list(separate.glob("*.pdf"))) == 4
+
+        separate_raster = root / "separate-raster"
+        run(binary, "--go", "--separate", "--strict", "--grid", "2x1",
+            "--whichpages", "1", "-o", str(separate_raster), str(source))
+        raster_outputs = sorted(separate_raster.glob("*.pdf"))
+        assert len(raster_outputs) == 2
+        assert all(page_count(item) == 1 for item in raster_outputs)
+        assert all("FIRST PAGE" not in run("pdftotext", str(item), "-")
+                   for item in raster_outputs)
 
         trimmed = root / "trimmed.pdf"
         run(binary, "--go", "--trim", "--trim-use", "all", "-o", str(trimmed), str(source))

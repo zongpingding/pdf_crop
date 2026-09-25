@@ -4,6 +4,7 @@
 #include <poppler-qt6.h>
 
 #include <QImage>
+#include <QRegularExpression>
 #include <QSet>
 
 #include <algorithm>
@@ -13,12 +14,27 @@ bool parsePageRange(const QString &expression, int pageCount,
                     QVector<int> &pages, QString &error) {
     pages.clear();
     if (pageCount < 1 || expression.trimmed().isEmpty()) {
-        error = QObject::tr("Enter a page range such as 1-5,8,10-.");
+        error = QObject::tr("Enter a page range such as 1-5,8,2x+1.");
         return false;
     }
     QSet<int> selected;
+    const QRegularExpression progression(QStringLiteral("^(\\d+)\\s*[xX]\\s*\\+\\s*(\\d+)$"));
     for (const QString &part : expression.split(QLatin1Char(','))) {
         const QString token = part.trimmed();
+        const auto match = progression.match(token);
+        if (match.hasMatch()) {
+            bool stepOk = false, offsetOk = false;
+            const qint64 step = match.captured(1).toLongLong(&stepOk);
+            const qint64 offset = match.captured(2).toLongLong(&offsetOk);
+            if (!stepOk || !offsetOk || step < 1 || step > pageCount ||
+                offset > pageCount - step) {
+                error = QObject::tr("Invalid page range: %1").arg(expression);
+                return false;
+            }
+            for (qint64 page = step + offset; page <= pageCount; page += step)
+                selected.insert(int(page - 1));
+            continue;
+        }
         const int dash = token.indexOf(QLatin1Char('-'));
         bool firstOk = false;
         const int first = (dash < 0 ? token : token.left(dash)).toInt(&firstOk);

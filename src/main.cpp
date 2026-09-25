@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QButtonGroup>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QCommandLineParser>
@@ -20,6 +21,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -30,12 +32,14 @@
 #include <QMessageBox>
 #include <QPalette>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTemporaryDir>
 #include <QToolBar>
 #include <QToolButton>
 #include <QWidgetAction>
@@ -54,7 +58,7 @@ static bool writeVectorPdf(const QString &input, const QString &output,
                            const QVector<CropJob> &jobs, int rotation, QString &error) {
     const QByteArray inputBytes = QFile::encodeName(input);
     const QString staging = QFileInfo(output).dir().filePath(
-        QStringLiteral(".pdf-select-crop-%1.pdf")
+        QStringLiteral(".prop-%1.pdf")
             .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
     const QByteArray outputBytes = QFile::encodeName(staging);
     QVector<pdf_crop_job> vectorJobs;
@@ -87,7 +91,7 @@ static bool writeVectorPdf(const QString &input, const QString &output,
 static bool writeFullPagesPdf(const QString &input, const QString &output,
                               const QVector<int> &pages, QString &error) {
     const QString staging = QFileInfo(output).dir().filePath(
-        QStringLiteral(".pdf-select-crop-%1.pdf")
+        QStringLiteral(".prop-%1.pdf")
             .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
     const QByteArray inputBytes = QFile::encodeName(input);
     const QByteArray stagingBytes = QFile::encodeName(staging);
@@ -110,6 +114,46 @@ static bool writeFullPagesPdf(const QString &input, const QString &output,
     return true;
 }
 
+static bool writeSeparateCropPdfs(const QString &input, const Poppler::Document &document,
+                                  const QVector<CropJob> &jobs, const QString &folder,
+                                  bool raster, int dpi, int rotation, QString &error) {
+    if (jobs.size() < 2) {
+        error = QObject::tr("Separate export requires at least two selections.");
+        return false;
+    }
+    const QFileInfo destination(folder);
+    const QDir parent = destination.dir();
+    if (!parent.exists() || destination.exists() || destination.fileName().isEmpty()) {
+        error = QObject::tr("Choose a new folder name in an existing location.");
+        return false;
+    }
+    QTemporaryDir staging(parent.filePath(QStringLiteral(".prop-export-XXXXXX")));
+    if (!staging.isValid()) {
+        error = QObject::tr("Cannot create a temporary export folder.");
+        return false;
+    }
+    QHash<int, int> selectionsPerPage;
+    const int pageDigits = std::max(2, int(QString::number(document.numPages()).size()));
+    for (const CropJob &job : jobs) {
+        const int selectionNumber = ++selectionsPerPage[job.pageIndex];
+        const QString name = QStringLiteral("page-%1-selection-%2.pdf")
+                                 .arg(job.pageIndex + 1, pageDigits, 10, QChar('0'))
+                                 .arg(selectionNumber, 2, 10, QChar('0'));
+        const QString output = staging.filePath(name);
+        const QVector<CropJob> one{job};
+        const bool ok = raster
+            ? export_raster_pdf(document, output, one, dpi, rotation, error)
+            : writeVectorPdf(input, output, one, rotation, error);
+        if (!ok) return false;
+    }
+    if (destination.exists() ||
+        !QDir(parent).rename(QFileInfo(staging.path()).fileName(), destination.fileName())) {
+        error = QObject::tr("Cannot create export folder: %1").arg(folder);
+        return false;
+    }
+    return true;
+}
+
 class MainWindow final : public QMainWindow {
 public:
     Q_DECLARE_TR_FUNCTIONS(MainWindow)
@@ -127,8 +171,8 @@ public:
         applicationButton_->setPopupMode(QToolButton::InstantPopup);
         applicationButton_->setMenu(applicationMenu_);
         menuBar()->setCornerWidget(applicationButton_, Qt::TopRightCorner);
-        selectionMenu_ = menuBar()->addMenu(QString());
         editMenu_ = menuBar()->addMenu(QString());
+        selectionMenu_ = menuBar()->addMenu(QString());
         trimMenu_ = menuBar()->addMenu(QString());
         exportMenu_ = menuBar()->addMenu(QString());
 
@@ -279,8 +323,25 @@ public:
         editLayout->addWidget(aspectLabel_);
         aspect_ = new QComboBox(editPanel);
         aspect_->addItems({QString(), QStringLiteral("A4"), QStringLiteral("4:3"),
-                           QStringLiteral("16:9")});
+                           QStringLiteral("16:9"), QString()});
         editLayout->addWidget(aspect_);
+        auto *customAspectRow = new QHBoxLayout();
+        customAspectWidthLabel_ = new QLabel(editPanel);
+        customAspectWidth_ = new QDoubleSpinBox(editPanel);
+        customAspectHeightLabel_ = new QLabel(editPanel);
+        customAspectHeight_ = new QDoubleSpinBox(editPanel);
+        for (auto *value : {customAspectWidth_, customAspectHeight_}) {
+            value->setRange(0.001, 10000);
+            value->setDecimals(3);
+            value->setValue(1);
+            value->setEnabled(false);
+        }
+        customAspectRow->addWidget(customAspectWidthLabel_);
+        customAspectRow->addWidget(customAspectWidth_);
+        customAspectRow->addWidget(new QLabel(QStringLiteral(":"), editPanel));
+        customAspectRow->addWidget(customAspectHeightLabel_);
+        customAspectRow->addWidget(customAspectHeight_);
+        editLayout->addLayout(customAspectRow);
         device_ = new QPushButton(editPanel);
         removeSelection_ = new QPushButton(editPanel);
         editLayout->addWidget(device_);
@@ -302,81 +363,86 @@ public:
         trimLayout->addWidget(padding_);
         addPanel(trimMenu_, trimPanel);
 
-        scopeMenu_ = exportMenu_->addMenu(QString());
+        auto *exportPanel = new QWidget(exportMenu_);
+        exportPanel->setMinimumWidth(320);
+        auto *exportLayout = new QVBoxLayout(exportPanel);
+        scopeLabel_ = new QLabel(exportPanel);
+        exportLayout->addWidget(scopeLabel_);
         scope_ = new QComboBox(this);
         scope_->addItems({QString(), QString(), QString()});
         scope_->hide();
-        auto *scopeGroup = new QActionGroup(this);
+        auto *scopeGroup = new QButtonGroup(exportPanel);
         for (int index = 0; index < 3; ++index) {
-            auto *action = scopeMenu_->addAction(QString());
-            action->setCheckable(true);
-            scopeGroup->addAction(action);
-            scopeActions_.append(action);
-            connect(action, &QAction::triggered, this,
-                    [this, index] { scope_->setCurrentIndex(index); });
+            auto *option = new QRadioButton(exportPanel);
+            option->setObjectName(QStringLiteral("exportScope%1").arg(index));
+            scopeGroup->addButton(option, index);
+            scopeOptions_.append(option);
+            exportLayout->addWidget(option);
         }
-
-        auto *rangePanel = new QWidget(exportMenu_);
-        auto *rangeLayout = new QVBoxLayout(rangePanel);
-        pages_ = new QLineEdit(rangePanel);
+        connect(scopeGroup, &QButtonGroup::idClicked, scope_,
+                [this](int index) { scope_->setCurrentIndex(index); });
+        pages_ = new QLineEdit(exportPanel);
         pages_->setObjectName(QStringLiteral("exportPages"));
-        rangeLayout->addWidget(pages_);
-        pagesAction_ = addPanel(exportMenu_, rangePanel);
+        exportLayout->addWidget(pages_);
 
-        modeMenu_ = exportMenu_->addMenu(QString());
+        modeLabel_ = new QLabel(exportPanel);
+        exportLayout->addWidget(modeLabel_);
         mode_ = new QComboBox(this);
         mode_->addItems({QString(), QString()});
         mode_->hide();
-        auto *modeGroup = new QActionGroup(this);
+        auto *modeGroup = new QButtonGroup(exportPanel);
         for (int index = 0; index < 2; ++index) {
-            auto *action = modeMenu_->addAction(QString());
-            action->setCheckable(true);
-            modeGroup->addAction(action);
-            modeActions_.append(action);
-            connect(action, &QAction::triggered, this,
-                    [this, index] { mode_->setCurrentIndex(index); });
+            auto *option = new QRadioButton(exportPanel);
+            option->setObjectName(QStringLiteral("exportMode%1").arg(index));
+            modeGroup->addButton(option, index);
+            modeOptions_.append(option);
+            exportLayout->addWidget(option);
         }
+        connect(modeGroup, &QButtonGroup::idClicked, mode_,
+                [this](int index) { mode_->setCurrentIndex(index); });
 
-        auto *dpiPanel = new QWidget(exportMenu_);
-        auto *dpiLayout = new QVBoxLayout(dpiPanel);
-        dpiLabel_ = new QLabel(dpiPanel);
-        dpi_ = new QSpinBox(dpiPanel);
+        auto *dpiRow = new QHBoxLayout();
+        dpiLabel_ = new QLabel(exportPanel);
+        dpi_ = new QSpinBox(exportPanel);
         dpi_->setRange(150, 600);
         dpi_->setSingleStep(50);
         dpi_->setValue(300);
-        dpiLayout->addWidget(dpiLabel_);
-        dpiLayout->addWidget(dpi_);
-        dpiAction_ = addPanel(exportMenu_, dpiPanel);
+        dpiRow->addWidget(dpiLabel_);
+        dpiRow->addWidget(dpi_);
+        exportLayout->addLayout(dpiRow);
 
-        outputRotationMenu_ = exportMenu_->addMenu(QString());
+        outputRotationLabel_ = new QLabel(exportPanel);
+        exportLayout->addWidget(outputRotationLabel_);
         outputRotation_ = new QComboBox(this);
         for (int turns = 0; turns < 4; ++turns)
             outputRotation_->addItem(QString::number(turns * 90) + QChar(0x00B0), turns * 90);
         outputRotation_->hide();
-        auto *rotationGroup = new QActionGroup(this);
+        auto *rotationGroup = new QButtonGroup(exportPanel);
+        auto *rotationRow = new QHBoxLayout();
         for (int index = 0; index < 4; ++index) {
-            auto *action = outputRotationMenu_->addAction(outputRotation_->itemText(index));
-            action->setCheckable(true);
-            rotationGroup->addAction(action);
-            outputRotationActions_.append(action);
-            connect(action, &QAction::triggered, this,
-                    [this, index] { outputRotation_->setCurrentIndex(index); });
+            auto *option = new QRadioButton(outputRotation_->itemText(index), exportPanel);
+            rotationGroup->addButton(option, index);
+            rotationOptions_.append(option);
+            rotationRow->addWidget(option);
         }
+        connect(rotationGroup, &QButtonGroup::idClicked, outputRotation_,
+                [this](int index) { outputRotation_->setCurrentIndex(index); });
+        exportLayout->addLayout(rotationRow);
 
-        auto *outputPanel = new QWidget(exportMenu_);
-        auto *outputLayout = new QVBoxLayout(outputPanel);
-        save_ = new QPushButton(outputPanel);
-        outputLayout->addWidget(save_);
-        auto *separator = new QFrame(outputPanel);
+        separate_ = new QCheckBox(exportPanel);
+        separate_->setObjectName(QStringLiteral("separateExport"));
+        exportLayout->addWidget(separate_);
+        save_ = new QPushButton(exportPanel);
+        exportLayout->addWidget(save_);
+        auto *separator = new QFrame(exportPanel);
         separator->setFrameShape(QFrame::HLine);
-        outputLayout->addWidget(separator);
-        fullPages_ = new QPushButton(outputPanel);
-        outputLayout->addWidget(fullPages_);
-        addPanel(exportMenu_, outputPanel);
+        exportLayout->addWidget(separator);
+        fullPages_ = new QPushButton(exportPanel);
+        exportLayout->addWidget(fullPages_);
+        addPanel(exportMenu_, exportPanel);
 
-        connect(scope_, &QComboBox::currentIndexChanged, this, [this](int index) {
-            syncControls();
-        });
+        connect(scope_, &QComboBox::currentIndexChanged, this, [this] { syncControls(); });
+        connect(pages_, &QLineEdit::textChanged, this, [this] { syncControls(); });
         connect(selectionMode_, &QComboBox::currentIndexChanged, this, [this](int index) {
             if (auto *view = currentView()) {
                 view->setSelectionMode(static_cast<DocumentView::SelectionMode>(index));
@@ -394,6 +460,10 @@ public:
         });
         connect(grid_, &QPushButton::clicked, this, [this] { editMenu_->hide(); addGrid(); });
         connect(aspect_, &QComboBox::currentIndexChanged, this, [this] { applyAspect(); });
+        connect(customAspectWidth_, &QDoubleSpinBox::valueChanged, this,
+                [this] { if (aspect_->currentIndex() == 4) applyAspect(); });
+        connect(customAspectHeight_, &QDoubleSpinBox::valueChanged, this,
+                [this] { if (aspect_->currentIndex() == 4) applyAspect(); });
         connect(device_, &QPushButton::clicked, this, [this] {
             editMenu_->hide(); splitCurrentForDevice();
         });
@@ -410,6 +480,7 @@ public:
         connect(mode_, &QComboBox::currentIndexChanged, this, [this] { syncControls(); });
         connect(outputRotation_, &QComboBox::currentIndexChanged, this,
                 [this] { syncControls(); });
+        connect(separate_, &QCheckBox::toggled, this, [this] { syncControls(); });
         connect(save_, &QPushButton::clicked, this, [this] {
             exportMenu_->hide(); saveFile();
         });
@@ -425,7 +496,10 @@ public:
         tabs_->setMovable(true);
         layout->addWidget(tabs_);
         setCentralWidget(central);
-        connect(tabs_, &QTabWidget::currentChanged, this, [this] { syncControls(); });
+        connect(tabs_, &QTabWidget::currentChanged, this, [this] {
+            syncControls();
+            applyAspect();
+        });
         connect(tabs_, &QTabWidget::tabCloseRequested, this,
                 [this](int index) { closeTab(index); });
 
@@ -548,10 +622,9 @@ private:
     QLabel *rotationLabel_ = nullptr;
     QComboBox *rotation_ = nullptr;
     QComboBox *scope_ = nullptr;
-    QMenu *scopeMenu_ = nullptr;
-    QVector<QAction *> scopeActions_;
+    QLabel *scopeLabel_ = nullptr;
+    QVector<QRadioButton *> scopeOptions_;
     QLineEdit *pages_ = nullptr;
-    QWidgetAction *pagesAction_ = nullptr;
     QLabel *selectionModeLabel_ = nullptr;
     QComboBox *selectionMode_ = nullptr;
     QLabel *exceptionsLabel_ = nullptr;
@@ -561,6 +634,10 @@ private:
     QPushButton *grid_ = nullptr;
     QLabel *aspectLabel_ = nullptr;
     QComboBox *aspect_ = nullptr;
+    QLabel *customAspectWidthLabel_ = nullptr;
+    QDoubleSpinBox *customAspectWidth_ = nullptr;
+    QLabel *customAspectHeightLabel_ = nullptr;
+    QDoubleSpinBox *customAspectHeight_ = nullptr;
     QPushButton *trim_ = nullptr;
     QPushButton *trimGroup_ = nullptr;
     QLabel *paddingLabel_ = nullptr;
@@ -568,14 +645,14 @@ private:
     QPushButton *device_ = nullptr;
     QPushButton *removeSelection_ = nullptr;
     QComboBox *outputRotation_ = nullptr;
-    QMenu *outputRotationMenu_ = nullptr;
-    QVector<QAction *> outputRotationActions_;
+    QLabel *outputRotationLabel_ = nullptr;
+    QVector<QRadioButton *> rotationOptions_;
     QComboBox *mode_ = nullptr;
-    QMenu *modeMenu_ = nullptr;
-    QVector<QAction *> modeActions_;
+    QLabel *modeLabel_ = nullptr;
+    QVector<QRadioButton *> modeOptions_;
     QLabel *dpiLabel_ = nullptr;
     QSpinBox *dpi_ = nullptr;
-    QWidgetAction *dpiAction_ = nullptr;
+    QCheckBox *separate_ = nullptr;
     QPushButton *save_ = nullptr;
     QPushButton *fullPages_ = nullptr;
     int fullPageScope_ = 1;
@@ -642,9 +719,14 @@ private:
 
     void applyAspect() {
         auto *view = currentView();
-        if (!view) return;
         const double ratios[] = {0, 210.0 / 297.0, 4.0 / 3.0, 16.0 / 9.0};
-        view->canvas()->setAspectRatio(ratios[aspect_->currentIndex()]);
+        const int index = aspect_->currentIndex();
+        const bool custom = view && index == 4;
+        customAspectWidth_->setEnabled(custom);
+        customAspectHeight_->setEnabled(custom);
+        if (!view) return;
+        view->canvas()->setAspectRatio(index == 4
+            ? customAspectWidth_->value() / customAspectHeight_->value() : ratios[index]);
     }
 
     void trimCurrent(bool useGroup) {
@@ -768,6 +850,8 @@ private:
         fullPage_->setEnabled(loaded);
         grid_->setEnabled(loaded);
         aspect_->setEnabled(loaded);
+        customAspectWidth_->setEnabled(loaded && aspect_->currentIndex() == 4);
+        customAspectHeight_->setEnabled(loaded && aspect_->currentIndex() == 4);
         trim_->setEnabled(loaded);
         const bool groupTrimAvailable = exceptionsAvailable &&
             !view->exceptions().contains(view->pageIndex());
@@ -784,25 +868,31 @@ private:
             : tr("Delete active selection"));
         scope_->setItemText(1, loaded && view->selectionMode() == DocumentView::SelectionMode::Individual
                                   ? tr("Pages with selections") : tr("All pages"));
-        for (int index = 0; index < scopeActions_.size(); ++index) {
-            scopeActions_[index]->setText(scope_->itemText(index));
-            scopeActions_[index]->setChecked(index == scope_->currentIndex());
+        for (int index = 0; index < scopeOptions_.size(); ++index) {
+            scopeOptions_[index]->setText(scope_->itemText(index));
+            scopeOptions_[index]->setChecked(index == scope_->currentIndex());
         }
-        scopeMenu_->setTitle(tr("Pages for cropped export") + QStringLiteral(": ") +
-                             scope_->currentText());
-        pagesAction_->setVisible(scope_->currentIndex() == 2);
+        pages_->setEnabled(loaded && scope_->currentIndex() == 2);
         const bool raster = mode_->currentIndex() == 1;
-        for (int index = 0; index < modeActions_.size(); ++index) {
-            modeActions_[index]->setText(mode_->itemText(index));
-            modeActions_[index]->setChecked(index == mode_->currentIndex());
+        for (int index = 0; index < modeOptions_.size(); ++index) {
+            modeOptions_[index]->setText(mode_->itemText(index));
+            modeOptions_[index]->setChecked(index == mode_->currentIndex());
         }
-        modeMenu_->setTitle(tr("Export mode") + QStringLiteral(": ") +
-                            mode_->currentText());
-        dpiAction_->setVisible(raster);
-        for (int index = 0; index < outputRotationActions_.size(); ++index)
-            outputRotationActions_[index]->setChecked(index == outputRotation_->currentIndex());
-        outputRotationMenu_->setTitle(tr("Output rotation") + QStringLiteral(": ") +
-                                      outputRotation_->currentText());
+        dpiLabel_->setEnabled(loaded && raster);
+        dpi_->setEnabled(loaded && raster);
+        for (int index = 0; index < rotationOptions_.size(); ++index)
+            rotationOptions_[index]->setChecked(index == outputRotation_->currentIndex());
+        QVector<CropJob> possibleJobs;
+        QString possibleError;
+        const bool multipleJobs = loaded && buildJobs(*view, possibleJobs, possibleError) &&
+                                  possibleJobs.size() > 1;
+        if (!multipleJobs) {
+            const QSignalBlocker blocker(separate_);
+            separate_->setChecked(false);
+        }
+        separate_->setEnabled(multipleJobs);
+        save_->setText(multipleJobs && separate_->isChecked()
+                           ? tr("Export to folder…") : tr("Export selection…"));
         for (const auto &[menu, panel] : {
                  std::pair{selectionMenu_, selectionMode_->parentWidget()},
                  std::pair{trimMenu_, trim_->parentWidget()}}) {
@@ -851,8 +941,8 @@ private:
         }
         pageCount_->setText(loaded ? QStringLiteral(" / %1 ").arg(view->pageCount())
                                    : QStringLiteral(" / - "));
-        setWindowTitle(loaded ? tr("%1 — PDF Select Crop").arg(QFileInfo(view->path()).fileName())
-                              : tr("PDF Select Crop"));
+        setWindowTitle(loaded ? QStringLiteral("%1 — prop").arg(QFileInfo(view->path()).fileName())
+                              : QStringLiteral("prop"));
         if (!loaded)
             statusBar()->showMessage(tr("Open a PDF to begin."));
         else if (!view->hasBookmarks())
@@ -951,7 +1041,7 @@ private:
         language_ = language == QStringLiteral("en") ? QStringLiteral("en")
                                                         : QStringLiteral("zh_CN");
         if (language_ == QStringLiteral("zh_CN")) {
-            if (!translator_.load(QStringLiteral(":/i18n/pdf-select-crop_zh_CN.qm")))
+            if (!translator_.load(QStringLiteral(":/i18n/prop_zh_CN.qm")))
                 language_ = QStringLiteral("en");
             else
                 qApp->installTranslator(&translator_);
@@ -963,10 +1053,10 @@ private:
     }
 
     void retranslateUi() {
-        selectionMenu_->setTitle(tr("1. Selection use"));
-        editMenu_->setTitle(tr("2. Create and adjust"));
-        trimMenu_->setTitle(tr("3. Auto trim"));
-        exportMenu_->setTitle(tr("4. Export settings"));
+        editMenu_->setTitle(tr("Create selections"));
+        selectionMenu_->setTitle(tr("Apply selections"));
+        trimMenu_->setTitle(tr("Auto trim"));
+        exportMenu_->setTitle(tr("Export settings"));
         applicationButton_->setText(tr("More ▾"));
         fileMenu_->setTitle(tr("File"));
         historyMenu_->setTitle(tr("History"));
@@ -985,27 +1075,33 @@ private:
         darkTheme_->setText(tr("Dark"));
         englishAction_->setText(tr("English"));
         chineseAction_->setText(tr("Simplified Chinese"));
+        scopeLabel_->setText(tr("Pages for cropped export"));
         scope_->setItemText(0, tr("Current page only"));
         scope_->setItemText(2, tr("Specified pages"));
-        pages_->setPlaceholderText(tr("e.g. 1-5,8,10-"));
+        pages_->setPlaceholderText(tr("e.g. 1-5,8,2x+1"));
         selectionModeLabel_->setText(tr("Selections"));
         selectionMode_->setItemText(0, tr("Shared"));
         selectionMode_->setItemText(1, tr("Odd / even"));
         selectionMode_->setItemText(2, tr("Individual pages"));
         exceptionsLabel_->setText(tr("Exceptions"));
-        exceptions_->setPlaceholderText(tr("e.g. 1,5-7"));
+        exceptions_->setPlaceholderText(tr("e.g. 1,5-7,2x+1"));
         applyExceptionsButton_->setText(tr("Apply exception pages"));
         fullPage_->setText(tr("Full page"));
         grid_->setText(tr("Grid…"));
         aspectLabel_->setText(tr("Aspect"));
         aspect_->setItemText(0, tr("Free"));
+        aspect_->setItemText(4, tr("Custom"));
+        customAspectWidthLabel_->setText(tr("Width"));
+        customAspectHeightLabel_->setText(tr("Height"));
         trim_->setText(tr("Trim using current page"));
         paddingLabel_->setText(tr("Padding"));
         device_->setText(tr("Fit device…"));
+        outputRotationLabel_->setText(tr("Output rotation"));
+        modeLabel_->setText(tr("Export mode"));
         mode_->setItemText(0, tr("Keep text and vectors (best effort)"));
         mode_->setItemText(1, tr("Remove strictly (rasterize)"));
         dpiLabel_->setText(tr("DPI"));
-        save_->setText(tr("Export selection…"));
+        separate_->setText(tr("Save each selection separately"));
         fullPages_->setText(tr("Export complete pages…"));
         fullPages_->setToolTip(tr("Keep complete source pages; crop settings do not apply."));
         for (int i = 0; i < tabs_->count(); ++i)
@@ -1022,6 +1118,39 @@ private:
         QString error;
         if (!buildJobs(*view, jobs, error)) {
             QMessageBox::warning(this, tr("Cannot export"), error);
+            return;
+        }
+        if (separate_->isChecked() && jobs.size() > 1) {
+            const QString parent = QFileDialog::getExistingDirectory(
+                this, tr("Choose location for new folder"),
+                QFileInfo(view->path()).dir().absolutePath());
+            if (parent.isEmpty()) return;
+            bool accepted = false;
+            const QString name = QInputDialog::getText(
+                this, tr("Name the export folder"), tr("Folder name:"),
+                QLineEdit::Normal,
+                QFileInfo(view->path()).completeBaseName() + QStringLiteral("-crops"),
+                &accepted).trimmed();
+            if (!accepted) return;
+            if (name.isEmpty() || name == QStringLiteral(".") ||
+                name == QStringLiteral("..") || name.contains(QLatin1Char('/')) ||
+                name.contains(QLatin1Char('\\'))) {
+                QMessageBox::warning(this, tr("Cannot export"), tr("Enter a valid folder name."));
+                return;
+            }
+            const QString folder = QDir(parent).filePath(name);
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            const bool ok = writeSeparateCropPdfs(view->path(), view->document(), jobs, folder,
+                                                  mode_->currentIndex() == 1, dpi_->value(),
+                                                  outputRotation_->currentData().toInt(), error);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::critical(this, tr("Export failed"), error);
+                return;
+            }
+            statusBar()->showMessage(tr("Exported: %1").arg(folder), 10000);
+            QMessageBox::information(this, tr("Export complete"),
+                                     tr("Saved to:\n%1").arg(folder));
             return;
         }
         const QString suggested = QFileInfo(view->path()).completeBaseName()
@@ -1068,7 +1197,7 @@ private:
         scope->setCurrentIndex(fullPageScope_);
         layout->addWidget(scope);
         auto *range = new QLineEdit(&dialog);
-        range->setPlaceholderText(tr("e.g. 1-5,8,10-"));
+        range->setPlaceholderText(tr("e.g. 1-5,8,2x+1"));
         range->setText(fullPageRange_);
         range->setVisible(scope->currentIndex() == 2);
         layout->addWidget(range);
@@ -1164,6 +1293,7 @@ static int runBatch(const QCommandLineParser &parser) {
     if (parser.isSet(QStringLiteral("complete-pages"))) {
         if (parser.isSet(QStringLiteral("grid")) || parser.isSet(QStringLiteral("trim")) ||
             parser.isSet(QStringLiteral("device")) || parser.isSet(QStringLiteral("strict")) ||
+            parser.isSet(QStringLiteral("separate")) ||
             parser.value(QStringLiteral("rotate")) != QStringLiteral("0") ||
             parser.isSet(QStringLiteral("exceptions")) ||
             parser.value(QStringLiteral("selections")) != QStringLiteral("all"))
@@ -1234,12 +1364,31 @@ static int runBatch(const QCommandLineParser &parser) {
             for (const QRectF &part : parts) jobs.append({pageIndex, part});
         }
     }
+    if (parser.isSet(QStringLiteral("separate"))) {
+        if (!writeSeparateCropPdfs(input, *document, jobs, output,
+                                   parser.isSet(QStringLiteral("strict")), dpi, rotation, error))
+            return fail(error);
+        fprintf(stdout, "%s\n", qPrintable(output));
+        return 0;
+    }
     const bool ok = parser.isSet(QStringLiteral("strict"))
         ? export_raster_pdf(*document, output, jobs, dpi, rotation, error)
         : writeVectorPdf(input, output, jobs, rotation, error);
     if (!ok) return fail(error);
     fprintf(stdout, "%s\n", qPrintable(output));
     return 0;
+}
+
+static void migrateLegacySettings() {
+    QSettings current;
+    if (!current.allKeys().isEmpty()) return;
+    QSettings previous(QSettings::NativeFormat, QSettings::UserScope,
+                       QStringLiteral("pdf-select-crop"),
+                       QStringLiteral("pdf-select-crop"));
+    for (const QString &key : {QStringLiteral("appearance/theme"),
+                               QStringLiteral("appearance/language"),
+                               QStringLiteral("history/files")})
+        if (previous.contains(key)) current.setValue(key, previous.value(key));
 }
 
 int main(int argc, char **argv) {
@@ -1249,18 +1398,20 @@ int main(int argc, char **argv) {
             QByteArray(argv[i]) == "--version" || QByteArray(argv[i]) == "-v")
             qputenv("QT_QPA_PLATFORM", "offscreen");
     QApplication app(argc, argv);
-    app.setApplicationName(QStringLiteral("pdf-select-crop"));
-    app.setOrganizationName(QStringLiteral("pdf-select-crop"));
+    app.setApplicationName(QStringLiteral("prop"));
+    app.setOrganizationName(QStringLiteral("prop"));
     app.setStyle(QStringLiteral("Fusion"));
-    app.setApplicationVersion(QStringLiteral("0.5.0"));
+    app.setApplicationVersion(QStringLiteral("0.6.0"));
+    migrateLegacySettings();
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("Crop selected PDF regions."));
+    parser.setApplicationDescription(QStringLiteral("prop — crop selected PDF regions."));
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument(QStringLiteral("file"), QStringLiteral("Input PDF file."));
     parser.addOption({{QStringLiteral("o"), QStringLiteral("output")},
-                      QStringLiteral("Output PDF path (required with --go)."), QStringLiteral("file")});
-    parser.addOption({QStringLiteral("whichpages"), QStringLiteral("Pages such as 1-5,8,10-."), QStringLiteral("range")});
+                      QStringLiteral("Output PDF or new folder with --separate (required with --go)."),
+                      QStringLiteral("path")});
+    parser.addOption({QStringLiteral("whichpages"), QStringLiteral("Pages such as 1-5,8,2x+1."), QStringLiteral("range")});
     parser.addOption({QStringLiteral("initialpage"), QStringLiteral("Initial page to inspect."),
                       QStringLiteral("number"), QStringLiteral("1")});
     parser.addOption({QStringLiteral("grid"), QStringLiteral("Create a selection grid such as 2x2."),
@@ -1284,6 +1435,8 @@ int main(int argc, char **argv) {
     parser.addOption({QStringLiteral("go"), QStringLiteral("Export without opening the GUI.")});
     parser.addOption({QStringLiteral("complete-pages"),
                       QStringLiteral("Export complete pages without cropping (with --go).")});
+    parser.addOption({QStringLiteral("separate"),
+                      QStringLiteral("Save each cropped selection as a PDF in a new folder.")});
     parser.process(app);
     const QString selectionMode = parser.value(QStringLiteral("selections"));
     if (selectionMode != QStringLiteral("all") &&
@@ -1331,6 +1484,10 @@ int main(int argc, char **argv) {
     if (parser.isSet(QStringLiteral("go"))) return runBatch(parser);
     if (parser.isSet(QStringLiteral("complete-pages"))) {
         fprintf(stderr, "--complete-pages requires --go.\n");
+        return 1;
+    }
+    if (parser.isSet(QStringLiteral("separate"))) {
+        fprintf(stderr, "--separate requires --go.\n");
         return 1;
     }
     MainWindow window;

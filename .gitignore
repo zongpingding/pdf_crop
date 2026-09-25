@@ -23,6 +23,8 @@
 *.dll
 *.so.*
 
+# private file
+codex-README.txt
 
 # Fortran module files
 *.mod
