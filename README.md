@@ -4,6 +4,8 @@ prop (PDF crop) is an Arch Linux / Wayland desktop application based on C++17, Q
 
 ![Interface preview](screenshot.png)
 
+![Crop preview](screenshot-crop.png)
+
 [View dark theme preview](screenshot-dark-theme.png)
 
 [View 1600% local rendering preview](screenshot-1600.png)
