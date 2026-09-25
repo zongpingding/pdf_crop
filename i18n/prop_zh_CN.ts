@@ -32,6 +32,26 @@
 <context>
     <name>MainWindow</name>
     <message>
+        <source>PDF box…</source>
+        <translation>PDF 页面框…</translation>
+    </message>
+    <message>
+        <source>Active selection size before output rotation.</source>
+        <translation>当前选区的尺寸，未计入导出旋转。</translation>
+    </message>
+    <message>
+        <source>Add a selection from an explicit PDF page box on the current page.</source>
+        <translation>按当前页明确设置的 PDF 页面框添加选区。</translation>
+    </message>
+    <message>
+        <source>%1 × %2 mm</source>
+        <translation>%1 × %2 毫米</translation>
+    </message>
+    <message>
+        <source>No selection</source>
+        <translation>无选区</translation>
+    </message>
+    <message>
         <location filename="../src/main.cpp" line="530"/>
         <source>Cannot open PDF</source>
         <translation>无法打开 PDF</translation>

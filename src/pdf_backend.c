@@ -5,8 +5,71 @@
 
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+int read_pdf_page_boxes(const char *input_path, int page_index,
+                        pdf_page_box boxes[3], char *error, size_t error_capacity)
+{
+    if (error && error_capacity) error[0] = '\0';
+    if (!input_path || !*input_path || page_index < 0 || !boxes) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "Invalid PDF path or page number");
+        return 0;
+    }
+    memset(boxes, 0, 3 * sizeof(*boxes));
+    fz_context *ctx = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+    if (!ctx) {
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "Could not create MuPDF context");
+        return 0;
+    }
+    pdf_document *doc = NULL;
+    pdf_page *page = NULL;
+    fz_var(doc);
+    fz_var(page);
+    int ok = 1;
+    fz_try(ctx) {
+        fz_register_document_handlers(ctx);
+        doc = pdf_open_document(ctx, input_path);
+        if (pdf_needs_password(ctx, doc) || page_index >= pdf_count_pages(ctx, doc))
+            fz_throw(ctx, FZ_ERROR_ARGUMENT, "Cannot read PDF page boxes");
+        page = pdf_load_page(ctx, doc, page_index);
+        const fz_rect visible = pdf_bound_page(ctx, page, FZ_CROP_BOX);
+        if (fz_is_empty_rect(visible))
+            fz_throw(ctx, FZ_ERROR_ARGUMENT, "Page has empty visible bounds");
+        fz_matrix to_page;
+        pdf_page_transform(ctx, page, NULL, &to_page);
+        pdf_obj *keys[3] = { PDF_NAME(BleedBox), PDF_NAME(TrimBox), PDF_NAME(ArtBox) };
+        for (int i = 0; i < 3; ++i) {
+            // MuPDF normally falls back to CropBox when these boxes are absent.
+            // Only an explicit box is a useful crop preset.
+            pdf_obj *value = pdf_dict_get_inheritable(ctx, page->obj, keys[i]);
+            if (!pdf_is_array(ctx, value) || pdf_array_len(ctx, value) != 4)
+                continue;
+            const fz_rect region = fz_intersect_rect(
+                fz_transform_rect(pdf_to_rect(ctx, value), to_page), visible);
+            if (fz_is_empty_rect(region) || !isfinite(region.x0) ||
+                !isfinite(region.y0) || !isfinite(region.x1) || !isfinite(region.y1))
+                continue;
+            boxes[i].x0 = fmaxf(0, fminf(1, (region.x0 - visible.x0) / (visible.x1 - visible.x0)));
+            boxes[i].y0 = fmaxf(0, fminf(1, (region.y0 - visible.y0) / (visible.y1 - visible.y0)));
+            boxes[i].x1 = fmaxf(0, fminf(1, (region.x1 - visible.x0) / (visible.x1 - visible.x0)));
+            boxes[i].y1 = fmaxf(0, fminf(1, (region.y1 - visible.y0) / (visible.y1 - visible.y0)));
+            boxes[i].available = boxes[i].x0 < boxes[i].x1 && boxes[i].y0 < boxes[i].y1;
+        }
+    }
+    fz_catch(ctx) {
+        ok = 0;
+        if (error && error_capacity)
+            snprintf(error, error_capacity, "%s", fz_caught_message(ctx));
+    }
+    if (page) pdf_drop_page(ctx, page);
+    if (doc) pdf_drop_document(ctx, doc);
+    fz_drop_context(ctx);
+    return ok;
+}
 
 typedef struct {
     fz_rect keep;
@@ -42,10 +105,12 @@ static void crop_page(fz_context *ctx, pdf_document *doc, int index,
         if (fz_is_empty_rect(selected))
             fz_throw(ctx, FZ_ERROR_ARGUMENT, "Selected region is empty");
 
-        // Convert from the displayed page to the PDF's own coordinates.
-        fz_matrix to_pdf;
-        pdf_page_transform(ctx, page, NULL, &to_pdf);
-        crop_filter_data filter_data = { fz_transform_rect(selected, to_pdf) };
+        // Convert from displayed page coordinates back to PDF coordinates.
+        fz_matrix to_page;
+        pdf_page_transform(ctx, page, NULL, &to_page);
+        crop_filter_data filter_data = {
+            fz_transform_rect(selected, fz_invert_matrix(to_page))
+        };
         pdf_sanitize_filter_options sanitize = { 0 };
         sanitize.opaque = &filter_data;
         sanitize.culler = outside_selection;

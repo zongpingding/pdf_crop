@@ -1,0 +1,48 @@
+% Build with: pdflatex -halt-on-error -interaction=nonstopmode pdf-page-box-test.tex
+\documentclass{article}
+\usepackage[paperwidth=600bp,paperheight=800bp,margin=0bp]{geometry}
+\usepackage{tikz}
+\pagestyle{empty}
+
+% PDF coordinates start at the lower-left corner of the MediaBox.
+% All three optional boxes are explicit, so prop enables its PDF box menu.
+\pdfpageattr{%
+  /CropBox  [0 0 600 800]
+  /BleedBox [24 24 576 776]
+  /TrimBox  [48 48 552 752]
+  /ArtBox   [84 96 516 704]
+}
+
+\begin{document}
+\null
+\begin{tikzpicture}[remember picture,overlay]
+  \begin{scope}[shift={(current page.south west)},x=1bp,y=1bp]
+    \fill[gray!5] (0,0) rectangle (600,800);
+    \fill[white] (84,96) rectangle (516,704);
+    \draw[blue!75!black,line width=1.5pt] (24,24) rectangle (576,776);
+    \draw[green!45!black,line width=1.5pt] (48,48) rectangle (552,752);
+    \draw[orange!85!black,line width=1.5pt] (84,96) rectangle (516,704);
+
+    \node[anchor=west,text=blue!75!black,font=\sffamily\small\bfseries]
+      at (30,763) {BleedBox: [24 24 576 776]};
+    \node[anchor=west,text=green!45!black,font=\sffamily\small\bfseries]
+      at (54,739) {TrimBox: [48 48 552 752]};
+    \node[anchor=west,text=orange!85!black,font=\sffamily\small\bfseries]
+      at (90,691) {ArtBox: [84 96 516 704]};
+
+    \node[align=center,font=\sffamily\bfseries\LARGE,text=black!80]
+      at (300,570) {PDF Page Box Test};
+    \node[align=center,font=\sffamily\large,text=black!65]
+      at (300,525) {Open this file in prop and choose a PDF box.};
+    \node[align=center,font=\sffamily\normalsize,text=black!65]
+      at (300,480) {The new selection should follow its colored outline.};
+
+    \draw[black!25] (125,435) -- (475,435);
+    \node[align=left,anchor=north west,font=\sffamily\small,text=black!70]
+      at (130,410) {Blue: printing bleed area\\Green: finished page size\\Orange: main artwork area};
+
+    \node[align=center,font=\sffamily\small,text=black!55]
+      at (300,150) {MediaBox and CropBox: [0 0 600 800]};
+  \end{scope}
+\end{tikzpicture}
+\end{document}

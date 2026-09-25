@@ -37,6 +37,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTemporaryDir>
@@ -223,6 +224,32 @@ public:
 
         auto *toolbar = addToolBar(QString());
         toolbar->setMovable(false);
+        quickFullPage_ = toolbar->addAction(QString());
+        quickFullPage_->setObjectName(QStringLiteral("quickFullPage"));
+        connect(quickFullPage_, &QAction::triggered, this, [this] {
+            if (auto *view = currentView()) view->canvas()->addFullPage();
+        });
+        quickTrim_ = toolbar->addAction(QString());
+        quickTrim_->setObjectName(QStringLiteral("quickTrim"));
+        connect(quickTrim_, &QAction::triggered, this, [this] { trimCurrent(false); });
+        pageBox_ = new QComboBox(toolbar);
+        pageBox_->setObjectName(QStringLiteral("pdfPageBox"));
+        pageBox_->addItems({QString(), QStringLiteral("BleedBox"),
+                            QStringLiteral("TrimBox"), QStringLiteral("ArtBox")});
+        toolbar->addWidget(pageBox_);
+        connect(pageBox_, &QComboBox::activated, this, [this](int index) {
+            auto *view = currentView();
+            if (!view || index < 1 || index > 3 || !pageBoxes_[index - 1].available)
+                return;
+            const pdf_page_box box = pageBoxes_[index - 1];
+            QVector<QRectF> selections = view->selectionsForExport(view->pageIndex());
+            selections.append(QRectF(QPointF(box.x0, box.y0), QPointF(box.x1, box.y1)));
+            view->setCurrentSelections(selections, selections.size() - 1);
+            pageBox_->setCurrentIndex(0);
+        });
+        selectionSize_ = new QLabel(toolbar);
+        toolbar->addWidget(selectionSize_);
+        toolbar->addSeparator();
         auto *toolbarSpacer = new QWidget(toolbar);
         toolbarSpacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         toolbar->addWidget(toolbarSpacer);
@@ -610,6 +637,14 @@ private:
     QAction *next_ = nullptr;
     QAction *bookmarksAction_ = nullptr;
     QAction *selectionListAction_ = nullptr;
+    QAction *quickFullPage_ = nullptr;
+    QAction *quickTrim_ = nullptr;
+    QComboBox *pageBox_ = nullptr;
+    QLabel *selectionSize_ = nullptr;
+    QString pageBoxPath_;
+    int pageBoxPage_ = -1;
+    pdf_page_box pageBoxes_[3] = {};
+    QString pageBoxError_;
     QAction *lightTheme_ = nullptr;
     QAction *darkTheme_ = nullptr;
     QAction *englishAction_ = nullptr;
@@ -818,6 +853,48 @@ private:
     void syncControls() {
         auto *view = currentView();
         const bool loaded = view != nullptr;
+        quickFullPage_->setEnabled(loaded);
+        quickTrim_->setEnabled(loaded);
+        if (loaded && (pageBoxPath_ != view->path() || pageBoxPage_ != view->pageIndex())) {
+            pageBoxPath_ = view->path();
+            pageBoxPage_ = view->pageIndex();
+            char error[1024] = {};
+            const QByteArray path = QFile::encodeName(pageBoxPath_);
+            if (!read_pdf_page_boxes(path.constData(), pageBoxPage_, pageBoxes_,
+                                     error, sizeof(error))) {
+                pageBoxes_[0] = pageBoxes_[1] = pageBoxes_[2] = {};
+                pageBoxError_ = QString::fromUtf8(error);
+            } else {
+                pageBoxError_.clear();
+            }
+        }
+        if (!loaded) {
+            pageBoxPath_.clear();
+            pageBoxPage_ = -1;
+            pageBoxes_[0] = pageBoxes_[1] = pageBoxes_[2] = {};
+            pageBoxError_.clear();
+        }
+        bool hasPageBox = false;
+        auto *boxModel = qobject_cast<QStandardItemModel *>(pageBox_->model());
+        for (int index = 1; index <= 3; ++index) {
+            const bool available = loaded && pageBoxes_[index - 1].available;
+            boxModel->item(index)->setEnabled(available);
+            hasPageBox |= available;
+        }
+        pageBox_->setEnabled(hasPageBox);
+        pageBox_->setToolTip(pageBoxError_.isEmpty()
+            ? tr("Add a selection from an explicit PDF page box on the current page.")
+            : pageBoxError_);
+        if (loaded && view->hasSelection()) {
+            auto page = view->document().page(view->pageIndex());
+            const QRectF selection = view->selectionForExport();
+            const QSizeF points = page->pageSizeF();
+            selectionSize_->setText(tr("%1 × %2 mm")
+                .arg(QString::number(selection.width() * points.width() * 25.4 / 72.0, 'f', 1),
+                     QString::number(selection.height() * points.height() * 25.4 / 72.0, 'f', 1)));
+        } else {
+            selectionSize_->setText(tr("No selection"));
+        }
         previous_->setEnabled(loaded && view->pageIndex() > 0);
         next_->setEnabled(loaded && view->pageIndex() + 1 < view->pageCount());
         closeAction_->setEnabled(loaded);
@@ -1053,6 +1130,11 @@ private:
     }
 
     void retranslateUi() {
+        quickFullPage_->setText(tr("Full page"));
+        quickTrim_->setText(tr("Auto trim"));
+        quickTrim_->setToolTip(tr("Trim using current page"));
+        pageBox_->setItemText(0, tr("PDF box…"));
+        selectionSize_->setToolTip(tr("Active selection size before output rotation."));
         editMenu_->setTitle(tr("Create selections"));
         selectionMenu_->setTitle(tr("Apply selections"));
         trimMenu_->setTitle(tr("Auto trim"));
